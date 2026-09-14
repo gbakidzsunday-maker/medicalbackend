@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: rfid-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter          # a paid plan is required for persistent disks
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: DEVICE_API_KEY
+        generateValue: true   # Render generates a secret; copy it into the ESP32 sketch
+    disk:
+      name: rfid-data
+      mountPath: /var/data
+      sizeGB: 1
