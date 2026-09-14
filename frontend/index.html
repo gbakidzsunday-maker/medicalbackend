@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MedMon Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #262b36;
+    --text: #e8eaed;
+    --muted: #8b93a1;
+    --accent: #4fd1c5;
+    --red: #f56565;
+    --amber: #ecc94b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .toolbar {
+    display: flex; gap: 12px; align-items: center; margin-bottom: 20px; flex-wrap: wrap;
+  }
+  select, input {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font-size: 14px;
+  }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .status-dot.on { background: var(--accent); }
+  .status-dot.off { background: var(--red); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 22px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px;
+  }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 32px; font-weight: 700; margin-top: 6px; }
+  .card .unit { font-size: 14px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .card.warn .value { color: var(--amber); }
+  .card.bad .value { color: var(--red); }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .charts { grid-template-columns: 1fr; } }
+  .chart-box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px;
+  }
+  .chart-box h3 { margin: 0 0 10px; font-size: 13px; color: var(--muted); font-weight: 500; }
+  canvas { max-height: 220px; }
+</style>
+</head>
+<body>
+
+<h1>MedMon Dashboard</h1>
+<div class="sub">Live view of ESP32 pulse oximeter / temperature telemetry</div>
+
+<div class="toolbar">
+  <span><span id="connDot" class="status-dot off"></span><span id="connLabel">disconnected</span></span>
+  <select id="deviceSelect"><option value="">Loading devices…</option></select>
+  <button id="refreshBtn">Refresh devices</button>
+</div>
+
+<div class="cards">
+  <div class="card" id="spo2Card">
+    <div class="label">SpO2</div>
+    <div class="value"><span id="spo2Val">--</span><span class="unit">%</span></div>
+  </div>
+  <div class="card" id="bpmCard">
+    <div class="label">Heart Rate</div>
+    <div class="value"><span id="bpmVal">--</span><span class="unit">bpm</span></div>
+  </div>
+  <div class="card" id="tempCard">
+    <div class="label">Temperature</div>
+    <div class="value"><span id="tempVal">--</span><span class="unit">°C</span></div>
+  </div>
+  <div class="card" id="fingerCard">
+    <div class="label">Finger on sensor</div>
+    <div class="value" id="fingerVal">--</div>
+  </div>
+  <div class="card" id="rssiCard">
+    <div class="label">WiFi RSSI</div>
+    <div class="value"><span id="rssiVal">--</span><span class="unit">dBm</span></div>
+  </div>
+</div>
+
+<div class="charts">
+  <div class="chart-box"><h3>SpO2 (%)</h3><canvas id="spo2Chart"></canvas></div>
+  <div class="chart-box"><h3>Heart Rate (bpm)</h3><canvas id="bpmChart"></canvas></div>
+  <div class="chart-box"><h3>Temperature (°C)</h3><canvas id="tempChart"></canvas></div>
+  <div class="chart-box"><h3>WiFi RSSI (dBm)</h3><canvas id="rssiChart"></canvas></div>
+</div>
+
+<script>
+// ---- Config ----------------------------------------------------------
+const API_BASE = ""; // same origin as this page; set to "https://your-api.onrender.com" if hosted separately
+const MAX_POINTS = 60;
+
+// ---- State -------------------------------------------------------------
+let currentDevice = null;
+let ws = null;
+
+const charts = {};
+function makeChart(canvasId, label, color) {
+  const ctx = document.getElementById(canvasId).getContext("2d");
+  charts[canvasId] = new Chart(ctx, {
+    type: "line",
+    data: { labels: [], datasets: [{ label, data: [], borderColor: color, backgroundColor: color + "33", tension: 0.3, pointRadius: 0 }] },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: { ticks: { color: "#8b93a1", maxTicksLimit: 6 }, grid: { color: "#262b36" } },
+        y: { ticks: { color: "#8b93a1" }, grid: { color: "#262b36" } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+makeChart("spo2Chart", "SpO2", "#4fd1c5");
+makeChart("bpmChart", "BPM", "#f56565");
+makeChart("tempChart", "Temp", "#ecc94b");
+makeChart("rssiChart", "RSSI", "#8b93a1");
+
+function pushPoint(chartId, label, value) {
+  const c = charts[chartId];
+  c.data.labels.push(label);
+  c.data.datasets[0].data.push(value);
+  if (c.data.labels.length > MAX_POINTS) {
+    c.data.labels.shift();
+    c.data.datasets[0].data.shift();
+  }
+  c.update("none");
+}
+
+function setConn(connected) {
+  document.getElementById("connDot").className = "status-dot " + (connected ? "on" : "off");
+  document.getElementById("connLabel").textContent = connected ? "live" : "disconnected";
+}
+
+function applyReading(r) {
+  document.getElementById("spo2Val").textContent = r.spo2 != null ? r.spo2.toFixed(1) : "--";
+  document.getElementById("bpmVal").textContent = r.bpm_valid ? Math.round(r.bpm_avg) : "--";
+  document.getElementById("tempVal").textContent = r.temp_valid ? r.temp_c.toFixed(1) : "--";
+  document.getElementById("fingerVal").textContent = r.finger_on_sensor ? "Yes" : "No";
+  document.getElementById("rssiVal").textContent = r.wifi_rssi ?? "--";
+
+  document.getElementById("spo2Card").className = "card" + (r.spo2 && r.spo2 < 90 ? " bad" : r.spo2 && r.spo2 < 95 ? " warn" : "");
+  document.getElementById("fingerCard").className = "card" + (r.finger_on_sensor ? "" : " warn");
+
+  const t = new Date(r.server_timestamp).toLocaleTimeString();
+  pushPoint("spo2Chart", t, r.spo2);
+  pushPoint("bpmChart", t, r.bpm_valid ? r.bpm_avg : null);
+  pushPoint("tempChart", t, r.temp_valid ? r.temp_c : null);
+  pushPoint("rssiChart", t, r.wifi_rssi);
+}
+
+// ---- REST: device list + history -------------------------------------
+async function loadDevices() {
+  const res = await fetch(`${API_BASE}/api/devices`);
+  const devices = await res.json();
+  const sel = document.getElementById("deviceSelect");
+  sel.innerHTML = "";
+  if (devices.length === 0) {
+    sel.innerHTML = "<option value=''>No devices yet</option>";
+    return;
+  }
+  devices.forEach((d) => {
+    const opt = document.createElement("option");
+    opt.value = d.device_name;
+    opt.textContent = d.device_name;
+    sel.appendChild(opt);
+  });
+  currentDevice = devices[0].device_name;
+  sel.value = currentDevice;
+  await loadHistory(currentDevice);
+  connectWS();
+}
+
+async function loadHistory(deviceName) {
+  Object.values(charts).forEach((c) => { c.data.labels = []; c.data.datasets[0].data = []; c.update("none"); });
+  const res = await fetch(`${API_BASE}/api/readings?device_name=${encodeURIComponent(deviceName)}&limit=${MAX_POINTS}`);
+  if (!res.ok) return;
+  const page = await res.json();
+  page.readings.forEach(applyReading);
+}
+
+// ---- WebSocket: live updates -------------------------------------------
+function connectWS() {
+  if (ws) ws.close();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const wsUrl = API_BASE
+    ? API_BASE.replace(/^http/, proto === "wss" ? "wss" : "ws") + "/ws/live"
+    : `${proto}://${location.host}/ws/live`;
+
+  ws = new WebSocket(wsUrl);
+  ws.onopen = () => setConn(true);
+  ws.onclose = () => { setConn(false); setTimeout(connectWS, 3000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === "reading" && msg.data.device_name === currentDevice) {
+      applyReading(msg.data);
+    }
+  };
+}
+
+document.getElementById("deviceSelect").addEventListener("change", async (e) => {
+  currentDevice = e.target.value;
+  if (currentDevice) await loadHistory(currentDevice);
+});
+document.getElementById("refreshBtn").addEventListener("click", loadDevices);
+
+loadDevices();
+</script>
+</body>
+</html>
